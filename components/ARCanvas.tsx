@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { initializeHandLandmarker } from '../services/mediaPipeService';
+import { initializeHandLandmarker, initializeFaceLandmarker } from '../services/mediaPipeService';
 import { 
   PINCH_THRESHOLD, 
   SMOOTHING_FACTOR, 
@@ -8,7 +8,10 @@ import {
   AUDIO_WIND_THRESHOLD,
   WIND_FORCE,
   WIND_ACTION_DECAY,
-  PARTICLE_FRICTION
+  PARTICLE_FRICTION,
+  POUT_RATIO_THRESHOLD,
+  WIND_SUSTAIN_MS,
+  MOUTH_CLOSING_SENSITIVITY
 } from '../constants';
 import { Point, ToolMode, Particle } from '../types';
 
@@ -36,32 +39,32 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   const dataArrayRef = useRef<Uint8Array | null>(null);
   
   // State for tracking status
-  const [isModelLoaded, setIsModelLoaded] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [permissionGranted, setPermissionGranted] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isWindyState, setIsWindyState] = useState(false); // For UI feedback
+  const [debugMsg, setDebugMsg] = useState(''); // Debug feedback
 
   // Drawing state refs
   const lastPoint = useRef<Point | null>(null);
-  const missingFramesRef = useRef<number>(0); // Track frames where hand is lost to bridge gaps
+  const missingFramesRef = useRef<number>(0); 
   const requestRef = useRef<number>();
+
+  // Wind detection refs
+  const windTimerRef = useRef<number>(0); // Timestamp when wind should stop
+  const prevMouthOpennessRef = useRef<number>(0);
 
   // Helper: Create a new particle with volumetric spread
   const createParticle = (centerX: number, centerY: number, color: string, radius: number): Particle => {
-    // Random point inside circle for volumetric brush effect
-    const r = radius * Math.sqrt(Math.random()); // Uniform distribution
+    const r = radius * Math.sqrt(Math.random()); 
     const theta = Math.random() * 2 * Math.PI;
     
-    // Spread position based on brush size
     const x = centerX + r * Math.cos(theta);
     const y = centerY + r * Math.sin(theta);
 
-    // Random velocity angle for slight expansion
     const vAngle = Math.random() * 2 * Math.PI;
-    const speed = Math.random() * 0.5; // Reduced speed for tighter lines
+    const speed = Math.random() * 0.5;
 
-    // Randomize size: mostly small dust, occasional sparkle
-    // Reduce size slightly for finer look
     const isSparkle = Math.random() > 0.95; 
     const size = isSparkle ? Math.random() * 1.5 + 0.8 : Math.random() * 1.0 + 0.2;
 
@@ -73,8 +76,13 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       life: 1.0,
       decay: PARTICLE_DECAY_RATE,
       size: size,
-      color: isSparkle ? '#ffffff' : color, // Sparkles are white
+      color: isSparkle ? '#ffffff' : color, 
     };
+  };
+
+  // Helper: Calculate Euclidean distance
+  const distance = (p1: {x: number, y: number}, p2: {x: number, y: number}) => {
+    return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
   };
 
   // Initialize Camera & Audio
@@ -87,10 +95,9 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
             height: { ideal: 720 },
             facingMode: 'user',
           },
-          audio: true, // Request microphone
+          audio: true, 
         });
         
-        // Video Setup
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.addEventListener('loadeddata', () => {
@@ -98,7 +105,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
           });
         }
 
-        // Audio Setup
         const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
         const audioCtx = new AudioContext();
         const analyser = audioCtx.createAnalyser();
@@ -121,7 +127,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
 
     startMedia();
     
-    // Cleanup Audio Context
     return () => {
       if (audioContextRef.current) {
         audioContextRef.current.close();
@@ -129,18 +134,21 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     };
   }, []);
 
-  // Initialize MediaPipe
+  // Initialize MediaPipe (Hand and Face)
   useEffect(() => {
-    const initModel = async () => {
+    const initModels = async () => {
       try {
-        await initializeHandLandmarker();
-        setIsModelLoaded(true);
+        await Promise.all([
+          initializeHandLandmarker(),
+          initializeFaceLandmarker()
+        ]);
+        setModelsLoaded(true);
         setIsLoading(false);
       } catch (error) {
-        console.error("Failed to load MediaPipe model:", error);
+        console.error("Failed to load MediaPipe models:", error);
       }
     };
-    initModel();
+    initModels();
   }, []);
 
   // Handle Clear
@@ -166,56 +174,118 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   const detectAndDraw = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const landmarker = await initializeHandLandmarker();
+    const handLandmarker = await initializeHandLandmarker();
+    const faceLandmarker = await initializeFaceLandmarker();
 
-    if (!video || !canvas || !landmarker || video.readyState !== 4) {
+    if (!video || !canvas || !handLandmarker || !faceLandmarker || video.readyState !== 4) {
       requestRef.current = requestAnimationFrame(detectAndDraw);
       return;
     }
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    const startTimeMs = performance.now();
 
-    // --- 1. Audio Analysis (Wind Detection) ---
-    let isWindy = false;
+    // --- 1. Audio Analysis ---
+    let isLoudEnough = false;
+    let volume = 0;
     if (analyserRef.current && dataArrayRef.current) {
       analyserRef.current.getByteFrequencyData(dataArrayRef.current);
-      // Calculate average volume
       let sum = 0;
-      for (let i = 0; i < dataArrayRef.current.length; i++) {
+      // Focus on lower-mid frequencies for blowing sounds
+      const length = dataArrayRef.current.length;
+      for (let i = 0; i < length; i++) {
         sum += dataArrayRef.current[i];
       }
-      const averageVolume = sum / dataArrayRef.current.length;
-      
-      if (averageVolume > AUDIO_WIND_THRESHOLD) {
-        isWindy = true;
+      volume = sum / length;
+      if (volume > AUDIO_WIND_THRESHOLD) {
+        isLoudEnough = true;
       }
-      
-      // Update state sparingly to avoid react render lag
-      if (Math.random() > 0.9) setIsWindyState(isWindy);
     }
 
-    // --- 2. Hand Tracking ---
-    const startTimeMs = performance.now();
-    const results = landmarker.detectForVideo(video, startTimeMs);
+    // --- 2. Face Detection (Pout & Movement) ---
+    const faceResults = faceLandmarker.detectForVideo(video, startTimeMs);
+    let isBlowingGesture = false;
+
+    if (faceResults.faceLandmarks && faceResults.faceLandmarks.length > 0) {
+      const fl = faceResults.faceLandmarks[0];
+      
+      const upperLip = fl[13];
+      const lowerLip = fl[14];
+      const leftCorner = fl[61];
+      const rightCorner = fl[291];
+      // Face height ref (top of forehead approx to chin) - using eye to chin for scale
+      const chin = fl[152];
+      const noseBridge = fl[6];
+      const faceHeight = distance(chin, noseBridge) * 2; // rough estimate
+
+      const mouthWidth = distance(leftCorner, rightCorner);
+      const mouthHeight = distance(upperLip, lowerLip);
+      const mouthOpenness = mouthHeight / faceHeight; // Normalized openness
+
+      // Check 1: Pouting Shape (Round mouth)
+      let isPouting = false;
+      if (mouthHeight > 0.001) {
+        const ratio = mouthWidth / mouthHeight;
+        // Pouting: Width is not much larger than height (Ratio close to 1.0)
+        // Relaxed threshold to capture more "natural" blowing faces
+        if (ratio < POUT_RATIO_THRESHOLD) {
+          isPouting = true;
+        }
+      }
+
+      // Check 2: Closing Mouth Gesture (User opening then closing/blowing)
+      // If previous openness was significantly larger than current, user is closing mouth
+      const isClosingMouth = (prevMouthOpennessRef.current - mouthOpenness) > MOUTH_CLOSING_SENSITIVITY;
+
+      // Update refs
+      prevMouthOpennessRef.current = mouthOpenness;
+
+      // Combined Gesture Logic
+      // We consider it a "Blow" if:
+      // A) The mouth is in a pout shape 
+      // OR 
+      // B) The mouth is actively closing (blowing action)
+      if (isPouting || isClosingMouth) {
+         isBlowingGesture = true;
+      }
+    }
+    
+    // --- 3. Combined Wind Logic ---
+    // Trigger if Loud AND (Gesture Detected OR Wind was recently active)
+    // We add sustain to prevent flickering
+    if (isLoudEnough && isBlowingGesture) {
+      windTimerRef.current = performance.now() + WIND_SUSTAIN_MS;
+    }
+
+    const isWindy = performance.now() < windTimerRef.current;
+
+    // UI Feedback throttling
+    if (Math.random() > 0.95) {
+      setIsWindyState(isWindy);
+      if (isWindy) setDebugMsg('💨 Blowing!');
+      else if (isLoudEnough && !isBlowingGesture) setDebugMsg('🔊 Loud (No Face)');
+      else if (!isLoudEnough && isBlowingGesture) setDebugMsg('👄 Face Ready (Blow!)');
+      else setDebugMsg('');
+    }
+
+    // --- 4. Hand Tracking & Drawing ---
+    const handResults = handLandmarker.detectForVideo(video, startTimeMs);
     
     let handDetected = false;
     let pinchDistance = 1;
     let newPoint = { x: 0, y: 0 };
     
-    // Critical Fix: Capture the previous point BEFORE updating the ref for the current frame
-    // If lastPoint is null (first frame or after loss), we handle it later
     const prevPoint = lastPoint.current; 
 
-    if (results.landmarks && results.landmarks.length > 0) {
+    if (handResults.landmarks && handResults.landmarks.length > 0) {
       handDetected = true;
-      missingFramesRef.current = 0; // Hand found, reset counter
+      missingFramesRef.current = 0;
 
-      const landmarks = results.landmarks[0];
+      const landmarks = handResults.landmarks[0];
       const indexTip = landmarks[8];
       const thumbTip = landmarks[4];
 
-      // Screen coords (mirrored)
       const rawX = (1 - indexTip.x) * canvas.width;
       const rawY = indexTip.y * canvas.height;
 
@@ -223,7 +293,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         Math.pow(indexTip.x - thumbTip.x, 2) + Math.pow(indexTip.y - thumbTip.y, 2)
       );
 
-      // Smooth coordinates using the captured prevPoint
       const currentX = prevPoint 
         ? prevPoint.x + (rawX - prevPoint.x) * SMOOTHING_FACTOR
         : rawX;
@@ -232,11 +301,8 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         : rawY;
 
       newPoint = { x: currentX, y: currentY };
-      
-      // Update the global ref to the new point for the *next* frame
       lastPoint.current = newPoint;
       
-      // Update Cursor
       if (cursorRef.current) {
         cursorRef.current.style.transform = `translate(${currentX}px, ${currentY}px)`;
         cursorRef.current.style.opacity = '1';
@@ -261,35 +327,23 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         }
       }
     } else {
-      // Hand lost logic
       missingFramesRef.current++;
-      
-      // If hand is lost for only a few frames (e.g., fast motion blur), we DO NOT reset lastPoint immediately.
-      // This allows the line to bridge the gap if the hand reappears within 10 frames (~160ms).
-      // If it's gone for longer, we assume the stroke has ended.
       if (missingFramesRef.current > 10) { 
         if (cursorRef.current) cursorRef.current.style.opacity = '0';
         lastPoint.current = null;
       }
     }
 
-    // --- 3. Particle Spawning & Interaction ---
-    // Use prevPoint (if available) to interpolate to newPoint
-    // If prevPoint is null (first frame), we just use newPoint as start (effectively drawing a dot)
+    // --- 5. Particle Spawning ---
     if (handDetected && pinchDistance < PINCH_THRESHOLD) {
       const startPoint = prevPoint || newPoint;
       
       if (toolMode === ToolMode.DRAW) {
-        // Calculate distance for interpolation
         const dist = Math.sqrt(
             Math.pow(newPoint.x - startPoint.x, 2) + 
             Math.pow(newPoint.y - startPoint.y, 2)
         );
 
-        // Interpolation Logic
-        // Calculate how many steps we need based on brush size. 
-        // Thinner brush = smaller steps needed to create continuous line.
-        // We ensure at least 1 step happens (to draw at current point even if stationary).
         const stepSize = Math.max(0.5, brushSize / 2); 
         const steps = Math.max(1, Math.ceil(dist / stepSize)); 
         
@@ -298,9 +352,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
            const spawnX = startPoint.x + (newPoint.x - startPoint.x) * t;
            const spawnY = startPoint.y + (newPoint.y - startPoint.y) * t;
 
-           // Scale spawn rate slightly by step count to avoid explosion on long fast strokes?
-           // Actually, constant density per pixel is desired. 
-           // Since stepSize is roughly constant, we spawn constant amount per step.
            const particlesPerStep = PARTICLE_SPAWN_RATE;
 
            for (let i = 0; i < particlesPerStep; i++) {
@@ -309,15 +360,12 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
             );
            }
         }
-        
       } else if (toolMode === ToolMode.ERASER) {
-        // Interpolated Eraser
-        // Same logic: move the eraser along the path to ensure we don't skip particles
          const dist = Math.sqrt(
             Math.pow(newPoint.x - startPoint.x, 2) + 
             Math.pow(newPoint.y - startPoint.y, 2)
         );
-        const steps = Math.max(1, Math.ceil(dist / (brushSize))); // Larger steps for eraser is fine
+        const steps = Math.max(1, Math.ceil(dist / (brushSize))); 
 
         for(let s = 1; s <= steps; s++) {
              const t = s / steps;
@@ -336,21 +384,19 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       }
     }
 
-    // Limit total particles to prevent crash
     if (particlesRef.current.length > 8000) {
       particlesRef.current = particlesRef.current.slice(particlesRef.current.length - 8000);
     }
 
-    // --- 4. Render & Update Particles ---
+    // --- 6. Render & Physics ---
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    
-    // Additive blending is key for the "Neon/Glow" look
     ctx.globalCompositeOperation = 'lighter'; 
 
     for (let i = 0; i < particlesRef.current.length; i++) {
       const p = particlesRef.current[i];
 
       if (isWindy) {
+        // Chaotic turbulence is better for "blowing away"
         p.vx += (Math.random() - 0.5) * WIND_FORCE;
         p.vy += (Math.random() - 0.5) * WIND_FORCE;
         p.life -= WIND_ACTION_DECAY;
@@ -368,7 +414,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fillStyle = p.color;
-        // Random "twinkle" flicker
         ctx.globalAlpha = p.life * (0.6 + Math.random() * 0.4);
         ctx.fill();
       }
@@ -376,33 +421,38 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     
     ctx.globalAlpha = 1.0;
     ctx.globalCompositeOperation = 'source-over';
-
     particlesRef.current = particlesRef.current.filter(p => p.life > 0);
 
     requestRef.current = requestAnimationFrame(detectAndDraw);
   }, [color, brushSize, toolMode]);
 
   useEffect(() => {
-    if (isModelLoaded && permissionGranted) {
+    if (modelsLoaded && permissionGranted) {
       requestRef.current = requestAnimationFrame(detectAndDraw);
     }
     return () => {
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
     };
-  }, [isModelLoaded, permissionGranted, detectAndDraw]);
+  }, [modelsLoaded, permissionGranted, detectAndDraw]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-black">
       {isLoading && (
          <div className="absolute inset-0 flex items-center justify-center z-50 bg-slate-900 text-white flex-col gap-4">
             <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-            <p className="font-medium animate-pulse">Initializing Vision & Audio...</p>
+            <p className="font-medium animate-pulse">Loading AI Models...</p>
          </div>
       )}
 
       {isWindyState && (
         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">
-          <p className="text-6xl font-bold text-white/20 animate-pulse tracking-widest uppercase">Windy</p>
+          <p className="text-6xl font-bold text-white/20 animate-pulse tracking-widest uppercase">Blowing</p>
+        </div>
+      )}
+      
+      {!isWindyState && !isLoading && (
+        <div className="absolute top-1/4 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20 transition-opacity duration-300">
+           {debugMsg && <p className="text-sm bg-slate-800/60 backdrop-blur px-3 py-1 rounded-full text-white/90 shadow-lg">{debugMsg}</p>}
         </div>
       )}
 
@@ -427,9 +477,9 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       </div>
       
       {!isLoading && (
-        <div className="absolute top-8 left-1/2 transform -translate-x-1/2 bg-black/50 backdrop-blur text-white px-6 py-3 rounded-full pointer-events-none animate-bounce z-10 text-center">
-           <p className="text-sm font-medium">👌 Pinch to emit particles</p>
-           <p className="text-xs text-slate-300 mt-1">💨 Blow into mic to scatter them</p>
+        <div className="absolute top-8 left-1/2 transform -translate-x-1/2 bg-black/50 backdrop-blur text-white px-6 py-3 rounded-full pointer-events-none animate-bounce z-10 text-center w-64">
+           <p className="text-sm font-medium">👌 Pinch to draw</p>
+           <p className="text-xs text-slate-300 mt-1">💨 Pout & Blow or Close Mouth to scatter</p>
         </div>
       )}
     </div>

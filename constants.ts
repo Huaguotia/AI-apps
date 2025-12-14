@@ -11,9 +11,19 @@ export const PARTICLE_SPAWN_RATE = 15; // Adjusted for thinner brushes
 export const PARTICLE_FRICTION = 0.90; // Stop quickly to hold shape in air
 
 // Audio Reactivity Constants
-export const AUDIO_WIND_THRESHOLD = 30; // Volume level (0-255) to trigger wind
+export const AUDIO_WIND_THRESHOLD = 15; // Lowered for better sensitivity (was 35)
 export const WIND_FORCE = 4.0; // Strong scatter force
 export const WIND_ACTION_DECAY = 0.05; // Fade fast when blowing
+
+// Facial Expression Constants
+// Width of mouth divided by Height of mouth.
+// Normal mouth is wide (Ratio > 1.5). Pouting/Blowing is round (Ratio < 1.0 - 1.2).
+export const POUT_RATIO_THRESHOLD = 1.8; // Relaxed threshold (was 1.25) to catch more blowing shapes
+export const MOUTH_OPEN_THRESHOLD = 0.05; // Minimum openness relative to face height to be considered "Open"
+export const MOUTH_CLOSING_SENSITIVITY = 0.005; // How much it needs to close to register movement
+
+// Wind Physics
+export const WIND_SUSTAIN_MS = 500; // How long wind continues after detection stops (smooths flickering)
 
 export const COLORS = [
   '#ef4444', // Red
