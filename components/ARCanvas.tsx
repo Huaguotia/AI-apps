@@ -43,22 +43,37 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
 
   // Drawing state refs
   const lastPoint = useRef<Point | null>(null);
+  const missingFramesRef = useRef<number>(0); // Track frames where hand is lost to bridge gaps
   const requestRef = useRef<number>();
 
-  // Helper: Create a new particle
-  const createParticle = (x: number, y: number, color: string, size: number): Particle => {
-    const angle = Math.random() * Math.PI * 2;
-    // Initial burst speed
-    const speed = Math.random() * 1.5;
+  // Helper: Create a new particle with volumetric spread
+  const createParticle = (centerX: number, centerY: number, color: string, radius: number): Particle => {
+    // Random point inside circle for volumetric brush effect
+    const r = radius * Math.sqrt(Math.random()); // Uniform distribution
+    const theta = Math.random() * 2 * Math.PI;
+    
+    // Spread position based on brush size
+    const x = centerX + r * Math.cos(theta);
+    const y = centerY + r * Math.sin(theta);
+
+    // Random velocity angle for slight expansion
+    const vAngle = Math.random() * 2 * Math.PI;
+    const speed = Math.random() * 0.5; // Reduced speed for tighter lines
+
+    // Randomize size: mostly small dust, occasional sparkle
+    // Reduce size slightly for finer look
+    const isSparkle = Math.random() > 0.95; 
+    const size = isSparkle ? Math.random() * 1.5 + 0.8 : Math.random() * 1.0 + 0.2;
+
     return {
-      x: x + (Math.random() - 0.5) * size * 0.5, // Tighter grouping
-      y: y + (Math.random() - 0.5) * size * 0.5,
-      vx: Math.cos(angle) * speed,
-      vy: Math.sin(angle) * speed, 
+      x,
+      y,
+      vx: Math.cos(vAngle) * speed,
+      vy: Math.sin(vAngle) * speed, 
       life: 1.0,
-      decay: PARTICLE_DECAY_RATE, // Set to 0 in constants for persistence
-      size: Math.random() * size * 0.6 + 2, 
-      color: color,
+      decay: PARTICLE_DECAY_RATE,
+      size: size,
+      color: isSparkle ? '#ffffff' : color, // Sparkles are white
     };
   };
 
@@ -183,12 +198,19 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     // --- 2. Hand Tracking ---
     const startTimeMs = performance.now();
     const results = landmarker.detectForVideo(video, startTimeMs);
+    
     let handDetected = false;
     let pinchDistance = 1;
     let newPoint = { x: 0, y: 0 };
+    
+    // Critical Fix: Capture the previous point BEFORE updating the ref for the current frame
+    // If lastPoint is null (first frame or after loss), we handle it later
+    const prevPoint = lastPoint.current; 
 
     if (results.landmarks && results.landmarks.length > 0) {
       handDetected = true;
+      missingFramesRef.current = 0; // Hand found, reset counter
+
       const landmarks = results.landmarks[0];
       const indexTip = landmarks[8];
       const thumbTip = landmarks[4];
@@ -201,15 +223,17 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         Math.pow(indexTip.x - thumbTip.x, 2) + Math.pow(indexTip.y - thumbTip.y, 2)
       );
 
-      // Smooth coordinates
-      const currentX = lastPoint.current 
-        ? lastPoint.current.x + (rawX - lastPoint.current.x) * SMOOTHING_FACTOR
+      // Smooth coordinates using the captured prevPoint
+      const currentX = prevPoint 
+        ? prevPoint.x + (rawX - prevPoint.x) * SMOOTHING_FACTOR
         : rawX;
-      const currentY = lastPoint.current 
-        ? lastPoint.current.y + (rawY - lastPoint.current.y) * SMOOTHING_FACTOR
+      const currentY = prevPoint 
+        ? prevPoint.y + (rawY - prevPoint.y) * SMOOTHING_FACTOR
         : rawY;
 
       newPoint = { x: currentX, y: currentY };
+      
+      // Update the global ref to the new point for the *next* frame
       lastPoint.current = newPoint;
       
       // Update Cursor
@@ -237,73 +261,115 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         }
       }
     } else {
-      if (cursorRef.current) cursorRef.current.style.opacity = '0';
-      lastPoint.current = null;
+      // Hand lost logic
+      missingFramesRef.current++;
+      
+      // If hand is lost for only a few frames (e.g., fast motion blur), we DO NOT reset lastPoint immediately.
+      // This allows the line to bridge the gap if the hand reappears within 10 frames (~160ms).
+      // If it's gone for longer, we assume the stroke has ended.
+      if (missingFramesRef.current > 10) { 
+        if (cursorRef.current) cursorRef.current.style.opacity = '0';
+        lastPoint.current = null;
+      }
     }
 
     // --- 3. Particle Spawning & Interaction ---
+    // Use prevPoint (if available) to interpolate to newPoint
+    // If prevPoint is null (first frame), we just use newPoint as start (effectively drawing a dot)
     if (handDetected && pinchDistance < PINCH_THRESHOLD) {
+      const startPoint = prevPoint || newPoint;
+      
       if (toolMode === ToolMode.DRAW) {
-        // Spawn particles
-        for (let i = 0; i < PARTICLE_SPAWN_RATE; i++) {
-          particlesRef.current.push(
-            createParticle(newPoint.x, newPoint.y, color, brushSize)
-          );
+        // Calculate distance for interpolation
+        const dist = Math.sqrt(
+            Math.pow(newPoint.x - startPoint.x, 2) + 
+            Math.pow(newPoint.y - startPoint.y, 2)
+        );
+
+        // Interpolation Logic
+        // Calculate how many steps we need based on brush size. 
+        // Thinner brush = smaller steps needed to create continuous line.
+        // We ensure at least 1 step happens (to draw at current point even if stationary).
+        const stepSize = Math.max(0.5, brushSize / 2); 
+        const steps = Math.max(1, Math.ceil(dist / stepSize)); 
+        
+        for(let s = 1; s <= steps; s++) {
+           const t = s / steps;
+           const spawnX = startPoint.x + (newPoint.x - startPoint.x) * t;
+           const spawnY = startPoint.y + (newPoint.y - startPoint.y) * t;
+
+           // Scale spawn rate slightly by step count to avoid explosion on long fast strokes?
+           // Actually, constant density per pixel is desired. 
+           // Since stepSize is roughly constant, we spawn constant amount per step.
+           const particlesPerStep = PARTICLE_SPAWN_RATE;
+
+           for (let i = 0; i < particlesPerStep; i++) {
+            particlesRef.current.push(
+                createParticle(spawnX, spawnY, color, brushSize)
+            );
+           }
         }
+        
       } else if (toolMode === ToolMode.ERASER) {
-        // Remove particles near cursor
-        const eraserRadius = brushSize * 4;
-        particlesRef.current = particlesRef.current.filter(p => {
-          const dx = p.x - newPoint.x;
-          const dy = p.y - newPoint.y;
-          return (dx*dx + dy*dy) > (eraserRadius * eraserRadius);
-        });
+        // Interpolated Eraser
+        // Same logic: move the eraser along the path to ensure we don't skip particles
+         const dist = Math.sqrt(
+            Math.pow(newPoint.x - startPoint.x, 2) + 
+            Math.pow(newPoint.y - startPoint.y, 2)
+        );
+        const steps = Math.max(1, Math.ceil(dist / (brushSize))); // Larger steps for eraser is fine
+
+        for(let s = 1; s <= steps; s++) {
+             const t = s / steps;
+             const targetX = startPoint.x + (newPoint.x - startPoint.x) * t;
+             const targetY = startPoint.y + (newPoint.y - startPoint.y) * t;
+             
+             const eraserRadius = brushSize * 4;
+             const rSq = eraserRadius * eraserRadius;
+
+             particlesRef.current = particlesRef.current.filter(p => {
+                const dx = p.x - targetX;
+                const dy = p.y - targetY;
+                return (dx*dx + dy*dy) > rSq;
+             });
+        }
       }
     }
 
     // Limit total particles to prevent crash
-    if (particlesRef.current.length > 5000) {
-      particlesRef.current = particlesRef.current.slice(particlesRef.current.length - 5000);
+    if (particlesRef.current.length > 8000) {
+      particlesRef.current = particlesRef.current.slice(particlesRef.current.length - 8000);
     }
 
     // --- 4. Render & Update Particles ---
-    // Clear the entire canvas for the next frame of animation
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Additive blending for glowing effect
+    // Additive blending is key for the "Neon/Glow" look
     ctx.globalCompositeOperation = 'lighter'; 
 
     for (let i = 0; i < particlesRef.current.length; i++) {
       const p = particlesRef.current[i];
 
       if (isWindy) {
-        // Wind Mode: Turbulence and rapid fade
         p.vx += (Math.random() - 0.5) * WIND_FORCE;
         p.vy += (Math.random() - 0.5) * WIND_FORCE;
         p.life -= WIND_ACTION_DECAY;
-        
-        // Apply position
         p.x += p.vx;
         p.y += p.vy;
       } else {
-        // Normal Mode: Physics with Friction (Stabilize)
         p.x += p.vx;
         p.y += p.vy;
-        
-        // Apply Friction to stop them from drifting forever
         p.vx *= PARTICLE_FRICTION;
         p.vy *= PARTICLE_FRICTION;
-        
-        // Natural decay (which is 0 by default now)
         p.life -= p.decay;
       }
 
-      // Draw
       if (p.life > 0) {
         ctx.beginPath();
-        ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fillStyle = p.color;
-        ctx.globalAlpha = p.life;
+        // Random "twinkle" flicker
+        ctx.globalAlpha = p.life * (0.6 + Math.random() * 0.4);
         ctx.fill();
       }
     }
@@ -311,7 +377,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     ctx.globalAlpha = 1.0;
     ctx.globalCompositeOperation = 'source-over';
 
-    // Remove dead particles
     particlesRef.current = particlesRef.current.filter(p => p.life > 0);
 
     requestRef.current = requestAnimationFrame(detectAndDraw);
@@ -335,7 +400,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
          </div>
       )}
 
-      {/* Wind Indicator */}
       {isWindyState && (
         <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none z-20">
           <p className="text-6xl font-bold text-white/20 animate-pulse tracking-widest uppercase">Windy</p>
@@ -355,7 +419,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
         className="absolute inset-0 w-full h-full pointer-events-none"
       />
 
-      {/* Cursor */}
       <div 
         ref={cursorRef}
         className="fixed top-0 left-0 w-8 h-8 border-2 border-white rounded-full pointer-events-none transform -translate-x-1/2 -translate-y-1/2 transition-all duration-75 z-40 flex items-center justify-center shadow-[0_0_10px_rgba(255,255,255,0.3)] opacity-0"
