@@ -2,7 +2,6 @@
   "name": "Copy of AirCanvas AR",
   "description": "A futuristic AR drawing experience controlled by hand gestures.",
   "requestFramePermissions": [
-    "camera",
-    "microphone"
+    "camera"
   ]
 }

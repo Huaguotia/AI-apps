@@ -6,20 +6,20 @@ export const DEFAULT_COLOR = '#3b82f6'; // Blue-500
 
 // Particle System Constants
 export const PARTICLE_MAX_LIFE = 1.0;
-export const PARTICLE_DECAY_RATE = 0.0; // Persistent
+export const PARTICLE_DECAY_RATE = 0.0; // Persistent (lines won't disappear automatically)
 export const PARTICLE_SPAWN_RATE = 15; // Adjusted for thinner brushes
 export const PARTICLE_FRICTION = 0.90; // Stop quickly to hold shape in air
 
-// Audio Reactivity Constants
-export const AUDIO_WIND_THRESHOLD = 15; // Lowered for better sensitivity (was 35)
-export const WIND_FORCE = 4.0; // Strong scatter force
-export const WIND_ACTION_DECAY = 0.05; // Fade fast when blowing
+// Wind Physics
+export const WIND_FORCE = 1.0; // Slower, gentler wind
+export const WIND_ACTION_DECAY = 0.01; // 1.0 / 0.01 = 100 frames @ 60fps ~= 1.66 seconds
 
 // Facial Expression Constants
 // Width of mouth divided by Height of mouth.
 // Normal mouth is wide (Ratio > 1.5). Pouting/Blowing is round (Ratio < 1.0 - 1.2).
-export const POUT_RATIO_THRESHOLD = 1.8; // Relaxed threshold (was 1.25) to catch more blowing shapes
-export const MOUTH_OPEN_THRESHOLD = 0.05; // Minimum openness relative to face height to be considered "Open"
+export const POUT_RATIO_THRESHOLD = 1.0; // Stricter threshold to avoid triggering on open mouths
+export const MOUTH_WIDTH_RELATIVE_THRESHOLD = 0.25; // Mouth width must be small relative to face height
+export const MOUTH_OPEN_THRESHOLD = 0.03; // Minimum openness relative to face height to be considered "Open"
 export const MOUTH_CLOSING_SENSITIVITY = 0.005; // How much it needs to close to register movement
 
 // Wind Physics

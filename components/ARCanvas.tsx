@@ -5,13 +5,13 @@ import {
   SMOOTHING_FACTOR, 
   PARTICLE_DECAY_RATE, 
   PARTICLE_SPAWN_RATE,
-  AUDIO_WIND_THRESHOLD,
   WIND_FORCE,
   WIND_ACTION_DECAY,
   PARTICLE_FRICTION,
   POUT_RATIO_THRESHOLD,
-  WIND_SUSTAIN_MS,
-  MOUTH_CLOSING_SENSITIVITY
+  MOUTH_WIDTH_RELATIVE_THRESHOLD,
+  MOUTH_OPEN_THRESHOLD,
+  WIND_SUSTAIN_MS
 } from '../constants';
 import { Point, ToolMode, Particle } from '../types';
 
@@ -34,9 +34,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
   
   // Systems Refs
   const particlesRef = useRef<Particle[]>([]);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const dataArrayRef = useRef<Uint8Array | null>(null);
   
   // State for tracking status
   const [modelsLoaded, setModelsLoaded] = useState(false);
@@ -52,7 +49,6 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
 
   // Wind detection refs
   const windTimerRef = useRef<number>(0); // Timestamp when wind should stop
-  const prevMouthOpennessRef = useRef<number>(0);
 
   // Helper: Create a new particle with volumetric spread
   const createParticle = (centerX: number, centerY: number, color: string, radius: number): Particle => {
@@ -77,6 +73,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       decay: PARTICLE_DECAY_RATE,
       size: size,
       color: isSparkle ? '#ffffff' : color, 
+      isBlown: false,
     };
   };
 
@@ -85,7 +82,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2));
   };
 
-  // Initialize Camera & Audio
+  // Initialize Camera (Audio removed)
   useEffect(() => {
     const startMedia = async () => {
       try {
@@ -95,7 +92,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
             height: { ideal: 720 },
             facingMode: 'user',
           },
-          audio: true, 
+          audio: false, // Disabled microphone
         });
         
         if (videoRef.current) {
@@ -104,34 +101,13 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
              setPermissionGranted(true);
           });
         }
-
-        const AudioContext = window.AudioContext || (window as any).webkitAudioContext;
-        const audioCtx = new AudioContext();
-        const analyser = audioCtx.createAnalyser();
-        const source = audioCtx.createMediaStreamSource(stream);
-        
-        source.connect(analyser);
-        analyser.fftSize = 256;
-        const bufferLength = analyser.frequencyBinCount;
-        const dataArray = new Uint8Array(bufferLength);
-
-        audioContextRef.current = audioCtx;
-        analyserRef.current = analyser;
-        dataArrayRef.current = dataArray;
-
       } catch (err) {
         console.error('Error accessing media devices:', err);
-        alert('Camera and Microphone permissions are required.');
+        alert('Camera permission is required.');
       }
     };
 
     startMedia();
-    
-    return () => {
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-      }
-    };
   }, []);
 
   // Initialize MediaPipe (Hand and Face)
@@ -186,24 +162,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     if (!ctx) return;
     const startTimeMs = performance.now();
 
-    // --- 1. Audio Analysis ---
-    let isLoudEnough = false;
-    let volume = 0;
-    if (analyserRef.current && dataArrayRef.current) {
-      analyserRef.current.getByteFrequencyData(dataArrayRef.current);
-      let sum = 0;
-      // Focus on lower-mid frequencies for blowing sounds
-      const length = dataArrayRef.current.length;
-      for (let i = 0; i < length; i++) {
-        sum += dataArrayRef.current[i];
-      }
-      volume = sum / length;
-      if (volume > AUDIO_WIND_THRESHOLD) {
-        isLoudEnough = true;
-      }
-    }
-
-    // --- 2. Face Detection (Pout & Movement) ---
+    // --- 1. Face Detection (Pout & Movement) ---
     const faceResults = faceLandmarker.detectForVideo(video, startTimeMs);
     let isBlowingGesture = false;
 
@@ -221,40 +180,26 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
 
       const mouthWidth = distance(leftCorner, rightCorner);
       const mouthHeight = distance(upperLip, lowerLip);
+      
       const mouthOpenness = mouthHeight / faceHeight; // Normalized openness
+      const mouthRelativeWidth = mouthWidth / faceHeight; // Normalized width
+      const ratio = mouthHeight > 0.001 ? mouthWidth / mouthHeight : 10;
 
-      // Check 1: Pouting Shape (Round mouth)
-      let isPouting = false;
-      if (mouthHeight > 0.001) {
-        const ratio = mouthWidth / mouthHeight;
-        // Pouting: Width is not much larger than height (Ratio close to 1.0)
-        // Relaxed threshold to capture more "natural" blowing faces
-        if (ratio < POUT_RATIO_THRESHOLD) {
-          isPouting = true;
-        }
-      }
+      // Gesture Check:
+      // 1. Mouth must be somewhat open (Openness > Threshold)
+      // 2. Mouth must be narrow/round (Ratio < Threshold AND Relative Width < Threshold)
+      // This combination ensures we are "Blowing/Pouting" and not just "Opening Mouth" (which would have high relative width)
+      
+      const isMouthOpen = mouthOpenness > MOUTH_OPEN_THRESHOLD;
+      const isPoutShape = ratio < POUT_RATIO_THRESHOLD && mouthRelativeWidth < MOUTH_WIDTH_RELATIVE_THRESHOLD;
 
-      // Check 2: Closing Mouth Gesture (User opening then closing/blowing)
-      // If previous openness was significantly larger than current, user is closing mouth
-      const isClosingMouth = (prevMouthOpennessRef.current - mouthOpenness) > MOUTH_CLOSING_SENSITIVITY;
-
-      // Update refs
-      prevMouthOpennessRef.current = mouthOpenness;
-
-      // Combined Gesture Logic
-      // We consider it a "Blow" if:
-      // A) The mouth is in a pout shape 
-      // OR 
-      // B) The mouth is actively closing (blowing action)
-      if (isPouting || isClosingMouth) {
+      if (isMouthOpen && isPoutShape) {
          isBlowingGesture = true;
       }
     }
     
-    // --- 3. Combined Wind Logic ---
-    // Trigger if Loud AND (Gesture Detected OR Wind was recently active)
-    // We add sustain to prevent flickering
-    if (isLoudEnough && isBlowingGesture) {
+    // --- 2. Wind Logic ---
+    if (isBlowingGesture) {
       windTimerRef.current = performance.now() + WIND_SUSTAIN_MS;
     }
 
@@ -263,13 +208,11 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     // UI Feedback throttling
     if (Math.random() > 0.95) {
       setIsWindyState(isWindy);
-      if (isWindy) setDebugMsg('💨 Blowing!');
-      else if (isLoudEnough && !isBlowingGesture) setDebugMsg('🔊 Loud (No Face)');
-      else if (!isLoudEnough && isBlowingGesture) setDebugMsg('👄 Face Ready (Blow!)');
+      if (isWindy) setDebugMsg('💨 Blowing Detected!');
       else setDebugMsg('');
     }
 
-    // --- 4. Hand Tracking & Drawing ---
+    // --- 3. Hand Tracking & Drawing ---
     const handResults = handLandmarker.detectForVideo(video, startTimeMs);
     
     let handDetected = false;
@@ -334,7 +277,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       }
     }
 
-    // --- 5. Particle Spawning ---
+    // --- 4. Particle Spawning ---
     if (handDetected && pinchDistance < PINCH_THRESHOLD) {
       const startPoint = prevPoint || newPoint;
       
@@ -384,30 +327,40 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       }
     }
 
-    if (particlesRef.current.length > 8000) {
-      particlesRef.current = particlesRef.current.slice(particlesRef.current.length - 8000);
+    // Increase limit to prevent lines from disappearing (was 8000)
+    if (particlesRef.current.length > 80000) {
+      particlesRef.current = particlesRef.current.slice(particlesRef.current.length - 80000);
     }
 
-    // --- 6. Render & Physics ---
+    // --- 5. Render & Physics ---
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.globalCompositeOperation = 'lighter'; 
 
     for (let i = 0; i < particlesRef.current.length; i++) {
       const p = particlesRef.current[i];
 
+      // If wind is active, mark particle as blown forever
       if (isWindy) {
-        // Chaotic turbulence is better for "blowing away"
+        p.isBlown = true;
+      }
+
+      if (p.isBlown) {
+        // Blown Physics: Turbulence and Fade Out
+        // Random drift + slight upward/outward force simulating breath
         p.vx += (Math.random() - 0.5) * WIND_FORCE;
         p.vy += (Math.random() - 0.5) * WIND_FORCE;
-        p.life -= WIND_ACTION_DECAY;
+        
+        p.life -= WIND_ACTION_DECAY; // Controlled fade (approx 1.5-2s)
         p.x += p.vx;
         p.y += p.vy;
       } else {
+        // Static Physics: Stay in place mostly
         p.x += p.vx;
         p.y += p.vy;
         p.vx *= PARTICLE_FRICTION;
         p.vy *= PARTICLE_FRICTION;
-        p.life -= p.decay;
+        
+        p.life -= p.decay; // Should be 0.0 so they never die automatically
       }
 
       if (p.life > 0) {
@@ -479,7 +432,7 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
       {!isLoading && (
         <div className="absolute top-8 left-1/2 transform -translate-x-1/2 bg-black/50 backdrop-blur text-white px-6 py-3 rounded-full pointer-events-none animate-bounce z-10 text-center w-64">
            <p className="text-sm font-medium">👌 Pinch to draw</p>
-           <p className="text-xs text-slate-300 mt-1">💨 Pout & Blow or Close Mouth to scatter</p>
+           <p className="text-xs text-slate-300 mt-1">💨 Blow air (Pout & Open) to scatter</p>
         </div>
       )}
     </div>

@@ -27,4 +27,5 @@ export interface Particle {
   decay: number;    // How fast it fades
   size: number;
   color: string;
+  isBlown?: boolean; // Tracks if the particle has been hit by wind
 }
