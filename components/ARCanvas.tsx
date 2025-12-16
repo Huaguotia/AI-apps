@@ -78,10 +78,10 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
     if (!tempCtx) return;
 
     const text = "MERRY CHRISTMAS!";
-    const fontSize = 50;
+    const fontSize = 100; // Larger font
     // Set canvas size large enough to hold text
-    tempCanvas.width = 600;
-    tempCanvas.height = 100;
+    tempCanvas.width = 1200;
+    tempCanvas.height = 250;
 
     tempCtx.font = `900 ${fontSize}px sans-serif`; // Heavy bold
     tempCtx.textAlign = 'center';
@@ -113,7 +113,8 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
                 
                 const pColor = xmasColors[Math.floor(Math.random() * xmasColors.length)];
 
-                particlesRef.current.push(createParticle(pX, pY, pColor, 2, strokeId, ParticleState.ALIVE));
+                // Use 0.5 radius to keep text crisp
+                particlesRef.current.push(createParticle(pX, pY, pColor, 0.5, strokeId, ParticleState.ALIVE));
             }
         }
     }
@@ -353,18 +354,8 @@ export const ARCanvas: React.FC<ARCanvasProps> = ({
                if (p.state === ParticleState.GATHERING) {
                  p.state = ParticleState.EXPLODING;
                  
-                 const tx = p.gatheringTargetX || p.x;
-                 const ty = p.gatheringTargetY || p.y;
-                 
-                 // Calculate angle for explosion: Radial from center
-                 let angle = Math.atan2(p.y - ty, p.x - tx);
-                 
-                 // If particles are too close to center (collapsed), give random direction
-                 // This ensures "towards screen surroundings" even if collapsed
-                 const dist = Math.sqrt(Math.pow(p.x - tx, 2) + Math.pow(p.y - ty, 2));
-                 if (dist < 10) {
-                     angle = Math.random() * 2 * Math.PI;
-                 }
+                 // Random angle 360 degrees
+                 const angle = Math.random() * 2 * Math.PI;
 
                  // High velocity for explosion
                  const speed = EXPLODE_FORCE * (0.8 + Math.random() * 0.4); 
