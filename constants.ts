@@ -14,6 +14,16 @@ export const PARTICLE_FRICTION = 0.90; // Stop quickly to hold shape in air
 export const WIND_FORCE = 1.0; // Slower, gentler wind
 export const WIND_ACTION_DECAY = 0.01; // 1.0 / 0.01 = 100 frames @ 60fps ~= 1.66 seconds
 
+// Shape/Gesture Physics
+export const GATHER_SPEED = 0.15; // How fast particles suck into the ball
+export const EXPLODE_FORCE = 15.0; // How fast they fly out
+export const EXPLODE_DECAY = 0.015; // Disappear in ~1.5s (1.0/0.015 ~ 66 frames)
+
+// Gesture Thresholds
+export const FIST_THRESHOLD = 0.12; // Average distance of fingertips to wrist to consider "Fist"
+export const PALM_OPEN_THRESHOLD = 0.25; // Average distance of fingertips to wrist to consider "Open"
+export const DOUBLE_PINCH_TIMING = 400; // ms between pinches to count as double pinch
+
 // Facial Expression Constants
 // Width of mouth divided by Height of mouth.
 // Normal mouth is wide (Ratio > 1.5). Pouting/Blowing is round (Ratio < 1.0 - 1.2).

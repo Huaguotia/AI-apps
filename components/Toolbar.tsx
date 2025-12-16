@@ -1,32 +1,64 @@
 import React from 'react';
 import { COLORS, BRUSH_SIZES } from '../constants';
-import { ToolMode } from '../types';
-import { Eraser, Paintbrush, Trash2, Undo } from 'lucide-react';
+import { ToolMode, AppMode } from '../types';
+import { Eraser, Paintbrush, Trash2, Undo, Hand, PenTool } from 'lucide-react';
 
 interface ToolbarProps {
   currentColor: string;
   brushSize: number;
   toolMode: ToolMode;
+  appMode: AppMode;
   onColorChange: (color: string) => void;
   onBrushSizeChange: (size: number) => void;
   onToolModeChange: (mode: ToolMode) => void;
+  onAppModeChange: (mode: AppMode) => void;
   onClear: () => void;
+  onUndo: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
   currentColor,
   brushSize,
   toolMode,
+  appMode,
   onColorChange,
   onBrushSizeChange,
   onToolModeChange,
+  onAppModeChange,
   onClear,
+  onUndo,
 }) => {
   return (
     <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 flex flex-col items-center gap-4 z-50 pointer-events-auto w-[90%] max-w-xl">
       
+      {/* Mode Switcher */}
+      <div className="bg-slate-900/80 backdrop-blur rounded-full p-1 border border-slate-700 flex gap-1">
+        <button
+          onClick={() => onAppModeChange(AppMode.FREE_DRAW)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all ${
+            appMode === AppMode.FREE_DRAW
+              ? 'bg-blue-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <PenTool size={16} />
+          Free Draw
+        </button>
+        <button
+          onClick={() => onAppModeChange(AppMode.GESTURE)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all ${
+            appMode === AppMode.GESTURE
+              ? 'bg-purple-600 text-white shadow-lg'
+              : 'text-slate-400 hover:text-white'
+          }`}
+        >
+          <Hand size={16} />
+          Magic Gestures
+        </button>
+      </div>
+
       {/* Primary Controls Container */}
-      <div className="bg-slate-900/90 backdrop-blur-md border border-slate-700 rounded-2xl shadow-2xl p-4 w-full flex flex-col gap-4 animate-in slide-in-from-bottom-10 fade-in duration-500">
+      <div className={`bg-slate-900/90 backdrop-blur-md border border-slate-700 rounded-2xl shadow-2xl p-4 w-full flex flex-col gap-4 animate-in slide-in-from-bottom-10 fade-in duration-500 ${appMode === AppMode.GESTURE ? 'opacity-50 pointer-events-none grayscale' : ''}`}>
         
         {/* Colors */}
         <div className="flex justify-between items-center gap-2 overflow-x-auto pb-2 scrollbar-hide">
@@ -72,6 +104,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
               }`}
             >
               <Eraser size={20} />
+            </button>
+            <button
+              onClick={onUndo}
+              className="p-3 rounded-xl bg-slate-800 text-slate-400 hover:bg-slate-700 transition-all"
+              title="Undo Last Stroke"
+            >
+              <Undo size={20} />
             </button>
           </div>
 
